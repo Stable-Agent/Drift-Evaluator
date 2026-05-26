@@ -1,0 +1,17 @@
+{
+  "instance_id": "django__django-14053",
+  "source": "livesweagent_opus45",
+  "intervention_step": 44,
+  "intervention_type": "scope_widen",
+  "intervention_draft": "Your current fix patches:\n  - `django/contrib/staticfiles/storage.py:~248` \u2014 yield inside max_post_process_passes loop with tracking check added\n\nThere is at least one additional site that requires a parallel fix:\n  - `django/contrib/staticfiles/storage.py:~231` \u2014 first pass yield - must populate processed_adjustable_paths dict here for adjustable paths\n\nApply the corresponding modification at that site too. The two changes go together; neither alone resolves the issue.",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 44,
+  "new_messages_count": 0,
+  "completed": true,
+  "end_reason": "submitted",
+  "final_patch": "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\n--- a/django/contrib/staticfiles/storage.py\n+++ b/django/contrib/staticfiles/storage.py\n@@ -225,15 +225,24 @@ class HashedFilesMixin:\n             path for path in paths\n             if matches_patterns(path, self._patterns)\n         ]\n+\n+        # Track yielded files to avoid yielding the same file multiple times.\n+        # Only yield a file again if its hashed name has changed.\n+        processed_adjustable_paths = {}\n+\n         # Do a single pass first. Post-process all files once, then repeat for\n         # adjustable files.\n         for name, hashed_name, processed, _ in self._post_process(paths, adjustable_paths, hashed_files):\n+            if name in adjustable_paths:\n+                processed_adjustable_paths[name] = hashed_name\n             yield name, hashed_name, processed\n \n         paths = {path: paths[path] for path in adjustable_paths}\n \n         for i in range(self.max_post_process_passes):\n             substitutions = False\n             for name, hashed_name, processed, subst in self._post_process(paths, adjustable_paths, hashed_files):\n-                yield name, hashed_name, processed\n+                if name not in processed_adjustable_paths or processed_adjustable_paths[name] != hashed_name:\n+                    processed_adjustable_paths[name] = hashed_name\n+                    yield name, hashed_name, processed\n                 substitutions = substitutions or subst\n \n             if not substitutions:\n",
+  "resolved_before": false,
+  "resolved_after": false,
+  "eval_report_path": "logs/run_evaluation/django__django-14053_track2_1778448263/intervention-harness/django__django-14053/report.json",
+  "elapsed_seconds": 90.52253198623657
+}

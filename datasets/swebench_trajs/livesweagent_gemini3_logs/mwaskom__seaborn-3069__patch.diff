@@ -1,0 +1,60 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a4..fc868766 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -6,6 +6,7 @@ import os
+ import re
+ import sys
+ import inspect
++import numpy as np
+ import itertools
+ import textwrap
+ from contextlib import contextmanager
+@@ -25,7 +26,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1475,7 +1476,7 @@ class Plotter:
+ 
+                 axes_df = self._filter_subplot_data(df, view)
+ 
+-                with pd.option_context("mode.use_inf_as_null", True):
++                if True:  # with pd.option_context("mode.use_inf_as_null", True):
+                     if keep_na:
+                         # The simpler thing to do would be x.dropna().reindex(x.index).
+                         # But that doesn't work with the way that the subset iteration
+@@ -1631,8 +1632,27 @@ class Plotter:
+             ax = sub["ax"]
+             for axis in "xy":
+                 axis_key = sub[axis]
+-
+-                # Axis limits
++                # Ensure Nominal scales have correct appearance
++                scale = self._scales.get(axis_key)
++                if isinstance(scale, Nominal):
++                    # Disable grid
++                    ax.grid(False, axis=axis)
++                    
++                    # Set limits (sticky edges trick replacement)
++                    if axis_key not in p._limits:
++                        bb = ax.dataLim
++                        if axis == "x":
++                            dlo, dhi = bb.intervalx
++                        else:
++                            dlo, dhi = bb.intervaly
++                        
++                        if np.isfinite(dlo) and np.isfinite(dhi):
++                             ax.set(**{f"{axis}lim": (dlo - 0.5, dhi + 0.5)})
++
++                    # Invert y-axis
++                    if axis == "y":
++                        if not ax.yaxis_inverted():
++                            ax.invert_yaxis()
+                 if axis_key in p._limits:
+                     convert_units = getattr(ax, f"{axis}axis").convert_units
+                     a, b = p._limits[axis_key]

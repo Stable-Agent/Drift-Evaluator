@@ -1,0 +1,25 @@
+{
+  "instance_id": "django__django-13925",
+  "source": "livesweagent_opus45",
+  "intervention_step": 44,
+  "intervention_type": "verification_test_design",
+  "intervention_draft": "Pause. Your test validated single-level inheritance (ExplicitParent \u2192 ExplicitChild), but what happens with GrandParent \u2192 Parent \u2192 Child where only GrandParent has the explicit pk?",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 44,
+  "new_messages_count": 0,
+  "completed": false,
+  "end_reason": "patch_apply_failed",
+  "final_patch": "diff --git a/django/db/models/base.py b/django/db/models/base.py\nindex 1234567..abcdefg 100644\n--- a/django/db/models/base.py\n+++ b/django/db/models/base.py\n@@ -1298,21 +1298,27 @@ class Model(metaclass=ModelBase):\n     @classmethod\n     def _check_default_pk(cls):\n         if (\n-            cls._meta.pk.auto_created and\n-            not settings.is_overridden('DEFAULT_AUTO_FIELD') and\n-            not cls._meta.app_config._is_default_auto_field_overridden\n+            not cls._meta.pk.auto_created or\n+            settings.is_overridden('DEFAULT_AUTO_FIELD') or\n+            cls._meta.app_config._is_default_auto_field_overridden\n         ):\n-            return [\n-                checks.Warning(\n-                    f\"Auto-created primary key used when not defining a \"\n-                    f\"primary key type, by default \"\n-                    f\"'{settings.DEFAULT_AUTO_FIELD}'.\",\n-                    hint=(\n-                        f\"Configure the DEFAULT_AUTO_FIELD setting or the \"\n-                        f\"{cls._meta.app_config.__class__.__qualname__}.\"\n-                        f\"default_auto_field attribute to point to a subclass \"\n-                        f\"of AutoField, e.g. 'django.db.models.BigAutoField'.\"\n-                    ),\n-                    obj=cls,\n-                    id='models.W042',\n-                ),\n-            ]\n-        return []\n+            return []\n+        # If the pk is a parent link, check the parent's pk was not\n+        # auto-created. This handles the case where a child model\n+        # inherits from a parent that has an explicitly defined pk.\n+        if (\n+            cls._meta.pk.remote_field and\n+            cls._meta.pk.remote_field.parent_link and\n+            not cls._meta.pk.remote_field.model._meta.pk.auto_created\n+        ):\n+            return []\n+        return [\n+            checks.Warning(\n+                f\"Auto-created primary key used when not defining a \"\n+                f\"primary key type, by default \"\n+                f\"'{settings.DEFAULT_AUTO_FIELD}'.\",\n+                hint=(\n+                    f\"Configure the DEFAULT_AUTO_FIELD setting or the \"\n+                    f\"{cls._meta.app_config.__class__.__qualname__}.\"\n+                    f\"default_auto_field attribute to point to a subclass \"\n+                    f\"of AutoField, e.g. 'django.db.models.BigAutoField'.\"\n+                ),\n+                obj=cls,\n+                id='models.W042',\n+            ),\n+        ]\n",
+  "resolved_before": false,
+  "resolved_after": null,
+  "eval_report_path": null,
+  "elapsed_seconds": 33.162445068359375,
+  "mode": "one-shot",
+  "config": {
+    "use_detector": "claude",
+    "ground_detector": false,
+    "validate_patch": false,
+    "no_corrector": true,
+    "corrector_text_override": false
+  }
+}

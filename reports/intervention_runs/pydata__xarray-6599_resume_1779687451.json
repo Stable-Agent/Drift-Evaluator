@@ -1,0 +1,25 @@
+{
+  "instance_id": "pydata__xarray-6599",
+  "source": "livesweagent_opus45",
+  "intervention_step": 14,
+  "intervention_type": "relocate_fix",
+  "intervention_draft": "Your fix is at:\n  - `xarray/core/computation.py:~1920` \u2014 Modify _ensure_numeric to special-case 1D DataArrays with datetime64 data + named coord, and to handle timedelta64 dtype without offset\n\nBut the bug is more general than this single site. The right fix lives upstream/at a shared helper:\n  - `xarray/core/computation.py:~1870` \u2014 Rewrite polyval body to convert coord via _ensure_numeric uniformly and broadcast properly\n  - `xarray/core/computation.py:~1920` \u2014 Generalize _ensure_numeric to convert datetime64/timedelta64 Variable data to float without coord-specific branching\n\nMove the fix to that location. Naming-the-site for the agent: this is where ambiguous matches first arise, not where they're consumed.",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 14,
+  "new_messages_count": 0,
+  "completed": false,
+  "end_reason": "patch_apply_failed",
+  "final_patch": "diff --git a/xarray/core/computation.py b/xarray/core/computation.py\n--- a/xarray/core/computation.py\n+++ b/xarray/core/computation.py\n@@ -1933,13 +1933,20 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:\n     from .dataset import Dataset\n \n     def to_floatable(x: DataArray) -> DataArray:\n-        if x.dtype.kind in \"mM\":\n+        if x.dtype.kind == \"m\":  # timedelta64\n+            return x.copy(\n+                data=datetime_to_numeric(\n+                    x.data,\n+                    offset=np.timedelta64(0, \"ns\"),\n+                    datetime_unit=\"ns\",\n+                ),\n+            )\n+        elif x.dtype.kind == \"M\":  # datetime64\n             return x.copy(\n                 data=datetime_to_numeric(\n                     x.data,\n                     offset=np.datetime64(\"1970-01-01\"),\n                     datetime_unit=\"ns\",\n                 ),\n             )\n         return x\n",
+  "resolved_before": false,
+  "resolved_after": null,
+  "eval_report_path": null,
+  "elapsed_seconds": 119.46577525138855,
+  "mode": "one-shot",
+  "config": {
+    "use_detector": null,
+    "ground_detector": false,
+    "validate_patch": false,
+    "no_corrector": false,
+    "corrector_text_override": false
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "instance_id": "django__django-15973",
+  "source": "livesweagent_opus45",
+  "intervention_step": 6,
+  "intervention_type": "relocate_fix",
+  "intervention_draft": "Your fix is at:\n  - `django/db/backends/base/schema.py:~453` \u2014 guard create_model M2M loop with isinstance(through, str) check\n  - `django/db/backends/base/schema.py:~460` \u2014 same guard in delete_model M2M loop\n  - `django/db/backends/base/schema.py:~633` \u2014 same guard in add_field for implicit M2M tables\n  - `django/db/backends/base/schema.py:~707` \u2014 same guard in remove_field for implicit M2M tables\n  - `django/db/backends/sqlite3/schema.py:~261` \u2014 guard in _remake_table delete branch\n  - `django/db/backends/sqlite3/schema.py:~407` \u2014 guard in remove_field\n  - `django/db/backends/sqlite3/schema.py:~474` \u2014 guard in alter pk related_models loop\n  - `django/db/backends/sqlite3/schema.py:~481` \u2014 guard in alter pk many_to_many loop\n\nBut the bug is more general than this single site. The right fix lives upstream/at a shared helper:\n  - `django/db/migrations/autodetector.py` \u2014 add dependency on through model's app when generating CreateModel/AddField for M2M with explicit through in another app\n\nMove the fix to that location. Naming-the-site for the agent: this is where ambiguous matches first arise, not where they're consumed.",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 6,
+  "new_messages_count": 0,
+  "completed": true,
+  "end_reason": "submitted",
+  "final_patch": "diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py\n--- a/django/db/migrations/autodetector.py\n+++ b/django/db/migrations/autodetector.py\n@@ -695,6 +695,15 @@ def _generate_added_field(self, app_label, model_name, field_name):\n                         (dep_app_label, dep_object_name, None, True),\n                     )\n                     preserve_default = False\n+            # Handle M2M through model in another app.\n+            if field.many_to_many and field.remote_field.through:\n+                through_model = field.remote_field.through\n+                if isinstance(through_model, str) and \".\" in through_model:\n+                    through_app_label, through_model_name = through_model.rsplit(\n+                        \".\", 1\n+                    )\n+                    if through_app_label != app_label:\n+                        dependencies.append((through_app_label, \"__first__\"))\n             self.add_operation(\n                 app_label,\n                 operations.AddField(\n@@ -928,6 +937,17 @@ def generate_created_models(self):\n                             related_fields[field.name] = field\n                             # Depend on the model this FK points to.\n                             dependencies.add(dep)\n+                    # Handle M2M through model in another app.\n+                    if field.many_to_many and field.remote_field.through:\n+                        through_model = field.remote_field.through\n+                        if isinstance(through_model, str) and \".\" in through_model:\n+                            through_app_label, through_model_name = (\n+                                through_model.rsplit(\".\", 1)\n+                            )\n+                            if through_app_label != app_label:\n+                                dependencies.add(\n+                                    (through_app_label, \"__first__\")\n+                                )\n                     # Depend on through models (which may themselves have\n                     # dependencies).\n                     for related_model in model._meta.related_objects:\n",
+  "resolved_before": false,
+  "resolved_after": false,
+  "eval_report_path": "logs/run_evaluation/django__django-15973_resume_1779687967/intervention-harness/django__django-15973/report.json",
+  "elapsed_seconds": 79.44242405891418,
+  "mode": "one-shot",
+  "config": {
+    "use_detector": null,
+    "ground_detector": false,
+    "validate_patch": false,
+    "no_corrector": false,
+    "corrector_text_override": false
+  }
+}

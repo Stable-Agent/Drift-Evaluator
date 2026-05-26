@@ -1,0 +1,17 @@
+{
+  "instance_id": "django__django-14053",
+  "source": "livesweagent_opus45",
+  "intervention_step": 18,
+  "intervention_type": "hypothesis_broaden",
+  "intervention_draft": "You're about to fix this as 'yield only if hash changed across passes.' Consider the alternative framing: 'yield each adjustable file exactly once, with its final state.' Which matches the issue text more literally? Sketch what each does on a file whose hash flips A\u2192B\u2192A across passes.",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 18,
+  "new_messages_count": 0,
+  "completed": true,
+  "end_reason": "submitted",
+  "final_patch": "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\nindex 3100389af8..e680683076 100644\n--- a/django/contrib/staticfiles/storage.py\n+++ b/django/contrib/staticfiles/storage.py\n@@ -225,12 +225,18 @@ class HashedFilesMixin:\n             path for path in paths\n             if matches_patterns(path, self._patterns)\n         ]\n+\n+        # Track the final processed state of adjustable files to yield them\n+        # only once with their final state.\n+        final_adjustable_paths = {}\n+\n         # Do a single pass first. Post-process all files once, then repeat for\n         # adjustable files.\n         for name, hashed_name, processed, _ in self._post_process(paths, adjustable_paths, hashed_files):\n-            yield name, hashed_name, processed\n-\n-        paths = {path: paths[path] for path in adjustable_paths}\n+            if name not in adjustable_paths:\n+                yield name, hashed_name, processed\n+            else:\n+                final_adjustable_paths[name] = (hashed_name, processed)\n \n         for i in range(self.max_post_process_passes):\n             substitutions = False\n@@ -244,6 +250,10 @@ class HashedFilesMixin:\n         if substitutions:\n             yield 'All', None, RuntimeError('Max post-process passes exceeded.')\n \n+        # Yield adjustable files with their final state.\n+        for name, (hashed_name, processed) in final_adjustable_paths.items():\n+            yield name, hashed_name, processed\n+\n         # Store the processed paths\n         self.hashed_files.update(hashed_files)\n \n@@ -256,7 +266,7 @@ class HashedFilesMixin:\n             # use the original, local file, not the copied-but-unprocessed\n             # file, which might be somewhere far away, like S3\n             storage, path = paths[name]\n-            with storage.open(path) as original_file:\n+            with storage.open(path) as original_file:\n                 cleaned_name = self.clean_name(name)\n                 hash_key = self.hash_key(cleaned_name)\n \n@@ -280,6 +290,7 @@ class HashedFilesMixin:\n                 if name in adjustable_paths:\n                     old_hashed_name = hashed_name\n                     content = original_file.read().decode('utf-8')\n+                    hashed_files_lookup = hashed_files.copy()\n                     for extension, patterns in self._patterns.items():\n                         if matches_patterns(path, (extension,)):\n                             for pattern, template in patterns:\n",
+  "resolved_before": false,
+  "resolved_after": false,
+  "eval_report_path": "logs/run_evaluation/django__django-14053_oneshot_1778389886/intervention-harness/django__django-14053/report.json",
+  "elapsed_seconds": 84.80887222290039
+}

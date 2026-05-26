@@ -1,0 +1,72 @@
+diff --git a/sphinx/ext/napoleon/docstring.py b/sphinx/ext/napoleon/docstring.py
+index b3daa06f1..c07c15408 100644
+--- a/sphinx/ext/napoleon/docstring.py
++++ b/sphinx/ext/napoleon/docstring.py
+@@ -392,15 +392,29 @@ class GoogleDocstring:
+         lines = []
+         for _name, _type, _desc in fields:
+             _desc = self._strip_empty(_desc)
+-            if any(_desc):
+-                _desc = self._fix_field_desc(_desc)
+-                field = ':%s %s: ' % (field_role, _name)
+-                lines.extend(self._format_block(field, _desc))
++
++            # Split on comma to handle multiple parameters like "x1, x2"
++            # but don't split special args like \*args, \*\*kwargs
++            if ', ' in _name:
++                names = [n.strip() for n in _name.split(', ')]
++                # Don't split if all parts start with \*
++                if all(n.startswith(r'\*') for n in names):
++                    names = [_name]
+             else:
+-                lines.append(':%s %s:' % (field_role, _name))
++                names = [_name]
++
++            for idx, name in enumerate(names):
++                if any(_desc):
++                    # Only fix field desc once for the first parameter
++                    if idx == 0:
++                        _desc = self._fix_field_desc(_desc)
++                    field = ':%s %s: ' % (field_role, name)
++                    lines.extend(self._format_block(field, _desc))
++                else:
++                    lines.append(':%s %s:' % (field_role, name))
+ 
+-            if _type:
+-                lines.append(':%s %s: %s' % (type_role, _name, _type))
++                if _type:
++                    lines.append(':%s %s: %s' % (type_role, name, _type))
+         return lines + ['']
+ 
+     def _format_field(self, _name: str, _type: str, _desc: List[str]) -> List[str]:
+@@ -436,9 +450,28 @@ class GoogleDocstring:
+                        ) -> List[str]:
+         field_type = ':%s:' % field_type.strip()
+         padding = ' ' * len(field_type)
+-        multi = len(fields) > 1
+-        lines = []  # type: List[str]
++
++        # Expand fields with comma-separated names into separate fields
++        # but only if they are not special args like *args, **kwargs
++        expanded_fields = []
+         for _name, _type, _desc in fields:
++            if ', ' in _name:
++                # Check if this is a special case like \*args, \*\*kwargs
++                # Don't split if all parts start with \*
++                names = [n.strip() for n in _name.split(', ')]
++                if all(n.startswith(r'\*') for n in names):
++                    # Keep as one field for special args
++                    expanded_fields.append((_name, _type, _desc))
++                else:
++                    # Split into separate fields
++                    for name in names:
++                        expanded_fields.append((name, _type, _desc))
++            else:
++                expanded_fields.append((_name, _type, _desc))
++
++        multi = len(expanded_fields) > 1
++        lines = []  # type: List[str]
++        for _name, _type, _desc in expanded_fields:
+             field = self._format_field(_name, _type, _desc)
+             if multi:
+                 if lines:

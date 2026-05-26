@@ -1,0 +1,69 @@
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index b192df4fbf..aa8be2bfd0 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -71,6 +71,18 @@ from django.db.models.query_utils import DeferredAttribute
+ from django.db.models.utils import resolve_callables
+ from django.utils.functional import cached_property
+ 
++def _filter_prefetch_queryset(queryset, query):
++    if queryset.query.is_sliced:
++        queryset = queryset.all()
++        limit = queryset.query.high_mark
++        offset = queryset.query.low_mark
++        queryset.query.clear_limits()
++        queryset = queryset.filter(**query)
++        queryset.query.set_limits(offset, limit)
++        return queryset
++    return queryset.filter(**query)
++
++
+ 
+ class ForeignKeyDeferredAttribute(DeferredAttribute):
+     def __set__(self, instance, value):
+@@ -145,8 +157,7 @@ class ForwardManyToOneDescriptor:
+             }
+         else:
+             query = {"%s__in" % self.field.related_query_name(): instances}
+-        queryset = queryset.filter(**query)
+-
++        queryset = _filter_prefetch_queryset(queryset, query)
+         # Since we're going to assign directly in the cache,
+         # we must manage the reverse relation cache manually.
+         if not remote_field.multiple:
+@@ -404,9 +415,7 @@ class ReverseOneToOneDescriptor:
+         instance_attr = self.related.field.get_foreign_related_value
+         instances_dict = {instance_attr(inst): inst for inst in instances}
+         query = {"%s__in" % self.related.field.name: instances}
+-        queryset = queryset.filter(**query)
+-
+-        # Since we're going to assign directly in the cache,
++        queryset = _filter_prefetch_queryset(queryset, query)
+         # we must manage the reverse relation cache manually.
+         for rel_obj in queryset:
+             instance = instances_dict[rel_obj_attr(rel_obj)]
+@@ -719,10 +728,8 @@ def create_reverse_many_to_one_manager(superclass, rel):
+             instance_attr = self.field.get_foreign_related_value
+             instances_dict = {instance_attr(inst): inst for inst in instances}
+             query = {"%s__in" % self.field.name: instances}
+-            queryset = queryset.filter(**query)
+ 
+-            # Since we just bypassed this class' get_queryset(), we must manage
+-            # the reverse relation manually.
++            queryset = _filter_prefetch_queryset(queryset, query)
+             for rel_obj in queryset:
+                 if not self.field.is_cached(rel_obj):
+                     instance = instances_dict[rel_obj_attr(rel_obj)]
+@@ -1052,11 +1059,9 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
+             queryset = queryset.using(queryset._db or self._db)
+ 
+             query = {"%s__in" % self.query_field_name: instances}
+-            queryset = queryset._next_is_sticky().filter(**query)
+ 
+             # M2M: need to annotate the query in order to get the primary model
+-            # that the secondary model was actually related to. We know that
+-            # there will already be a join on the join table, so we can just add
++            queryset = _filter_prefetch_queryset(queryset._next_is_sticky(), query)
+             # the select.
+ 
+             # For non-autocreated 'through' models, can't assume we are

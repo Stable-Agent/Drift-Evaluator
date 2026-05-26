@@ -1,0 +1,49 @@
+diff --git a/sympy/polys/factortools.py b/sympy/polys/factortools.py
+index c6a5f9f063..1ae9d610cb 100644
+--- a/sympy/polys/factortools.py
++++ b/sympy/polys/factortools.py
+@@ -1147,11 +1147,43 @@ def dmp_ext_factor(f, u, K):
+         return lc, []
+ 
+     f, F = dmp_sqf_part(f, u, K), f
++    
++    # Try factoring F over the base domain first to catch factors 
++    # that don't involve the extension
++    F_base = dmp_convert(F, u, K, K.dom)
++    _, base_factors = dmp_factor_list(F_base, u, K.dom)
++    
++    if len(base_factors) > 1:
++        # The polynomial factors over the base domain
++        # Factor each base factor separately over the extension
++        all_factors = []
++        for bf, _ in base_factors:
++            bf_K = dmp_convert(bf, u, K.dom, K)
++            # Use norm-based algorithm for this factor
++            bf_sqf = dmp_sqf_part(bf_K, u, K)
++            bf_s, bf_g, bf_r = dmp_sqf_norm(bf_sqf, u, K)
++            bf_norm_factors = dmp_factor_list_include(bf_r, u, K.dom)
++            
++            if len(bf_norm_factors) == 1:
++                # This base factor is irreducible over the extension
++                all_factors.append(bf_K)
++            else:
++                # This base factor can be further factored
++                H = dmp_raise([K.one, bf_s*K.unit], u, 0, K)
++                for bf_norm_f, _ in bf_norm_factors:
++                    h = dmp_convert(bf_norm_f, u, K.dom, K)
++                    h, _, bf_g = dmp_inner_gcd(h, bf_g, u, K)
++                    h = dmp_compose(h, H, u, K)
++                    all_factors.append(h)
++        
++        return lc, dmp_trial_division(F, all_factors, u, K)
++    
++    # If it doesn't factor over the base domain, use the norm-based algorithm
+     s, g, r = dmp_sqf_norm(f, u, K)
+-
+     factors = dmp_factor_list_include(r, u, K.dom)
+ 
+     if len(factors) == 1:
++        # The norm is irreducible, treat polynomial as irreducible
+         factors = [f]
+     else:
+         H = dmp_raise([K.one, s*K.unit], u, 0, K)

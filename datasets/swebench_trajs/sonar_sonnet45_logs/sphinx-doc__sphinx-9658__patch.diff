@@ -1,0 +1,37 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index a255c0691..a6647d092 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -1661,6 +1661,12 @@ class ClassDocumenter(DocstringSignatureMixin, ModuleLevelDocumenter):  # type:
+             else:
+                 bases = []
+ 
++            # For mocked base classes, use the actual class instead of the instance
++            # since __orig_bases__ may contain mock object instances which have
++            # incorrect __qualname__ attributes
++            bases = [base.__class__ if ismock(base) and not isinstance(base, type)
++                     else base for base in bases]
++
+             self.env.events.emit('autodoc-process-bases',
+                                  self.fullname, self.object, self.options, bases)
+ 
+diff --git a/sphinx/ext/autodoc/mock.py b/sphinx/ext/autodoc/mock.py
+index b562f47fd..158ed321e 100644
+--- a/sphinx/ext/autodoc/mock.py
++++ b/sphinx/ext/autodoc/mock.py
+@@ -170,6 +170,15 @@ def ismock(subject: Any) -> bool:
+         __mro__ = safe_getattr(type(subject), '__mro__', [])
+         if len(__mro__) > 2 and __mro__[1] is _MockObject:
+             return True
++        # For nested mocked objects (e.g., mock_module.submodule.Class),
++        # _MockObject may not be at __mro__[1], but should still be in the mro.
++        # We need to ensure the object is a direct instance of a mock class,
++        # not a real class that inherits from a mock.
++        if _MockObject in __mro__:
++            # Check if this is a mock instance (not a subclass created by user)
++            # by verifying __sphinx_mock__ is set on the class itself
++            if safe_getattr(type(subject), '__sphinx_mock__', None):
++                return True
+     except AttributeError:
+         pass
+ 

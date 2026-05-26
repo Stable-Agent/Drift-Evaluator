@@ -155,55 +155,135 @@ do not require Ollama or load any models — they run in under a second.
 
 ---
 
-## Results to date
+## Results — the four-phase story
 
-Run on the v1 synthetic dataset (200 conversations / 1776 turns / 31.5% drift rate).
+This benchmark went through four iterations. Each phase produced a result, and
+together they tell a story about what really limits drift detection on this
+kind of dataset. Run on 200 synthetic conversations / 1776 turns.
 
-| | v0 baseline (default config, thr=0.30) | v2 fitted (NLI signals, thr=0.40) | Δ |
-|---|---:|---:|---:|
-| Precision | 0.315 | 0.400 | **+0.084** |
-| Recall | 1.000 | 0.754 | -0.246 |
-| F1 | 0.480 | 0.522 | **+0.043** |
-| Accuracy | 0.316 | 0.565 | **+0.249** |
-| Brier (lower better) | 0.294 | 0.215 | **-0.079** |
-| Severity-confusion accuracy | 0.160 | 0.533 | **+0.373** |
+### Phase 1: baseline v0 (cosine signals)
 
-**The recall drop is misleading.** v0's recall=1.000 was a side-effect of its
-catastrophic false-positive rate (1215 FPs out of 1216 negatives — it flagged
-nearly every turn). v2 trades that pathology for an honest classifier:
-+25 points of accuracy and +37 points of severity-classification accuracy.
+| Metric (thr=0.30) | Value |
+|---|---:|
+| Precision | 0.315 |
+| Recall | 1.000 |
+| F1 | 0.480 |
+| Accuracy | 0.316 |
 
-### Per-signal predictive power
+v0's recall=1.000 was a pathology: it flagged 1215 false positives out of 1216
+negatives (the embedding-cosine constraint signal had ROC-AUC 0.49 — random).
+At v0's F1-optimal threshold of 0.60, F1 reaches 0.553.
 
-| Signal | v0 ROC-AUC | v2 ROC-AUC |
+### Phase 2: v2 NLI-based detector
+
+Replaced cosine constraints with NLI entailment, calibrated the goal signal,
+fit weights/threshold from data.
+
+| | v0 (default) | v2 fitted |
 |---|---:|---:|
-| goal | 0.648 | 0.647 |
-| constraint | **0.492** (random) | 0.526 |
-| consistency | 0.656 | 0.678 |
-| total | 0.693 | 0.678 |
+| F1 (own threshold) | 0.480 | 0.522 |
+| Brier (lower better) | 0.294 | **0.215** |
+| Severity confusion accuracy | 0.160 | **0.533** |
+| Constraint AUC | 0.492 | **0.534** |
 
-The v0 constraint signal was actively useless (Pearson r=−0.03, ROC-AUC at
-random). v2's NLI-based constraint signal is better but still weak. NLI
-entailment of "the response complies with: {constraint}" doesn't cleanly
-discriminate violations for arbitrary natural-language constraints — that's the
-biggest remaining gap and the natural target for Phase 3 (likely LLM-judge mode).
+The pathology disappeared (severity classification +37 points), but F1 only
+moved +0.04. NLI fixed the *wrong* signal but the constraint signal was still
+weak (0.534 ROC-AUC).
+
+### Phase 3: LLM-judge constraints
+
+Added an opt-in mode that uses local Llama 3.1 8B to judge each
+(response, constraint) pair on a 0-10 compliance scale. On a 73-conv
+fully-cached subset, the constraint signal moved 0.534 → **0.590** (+0.056).
+But the total ROC-AUC didn't improve and F1 stayed flat.
+
+### Phase 3.5: dataset audit + LLM-judge relabel
+
+A hand audit found **80% of "constraint_violation" labels were wrong** — Llama
+(the generator) ignored "violate this rule" instructions and produced
+compliant responses. The labels were the bottleneck, not the algorithms.
+
+Fix: regenerate the dataset with template-specific violation directives, then
+relabel via a strict LLM-judge with structured-output prompts (force the judge
+to extract a quote/topics/contradicted-claims as evidence before verdict).
+
+| | Original labels | After relabel |
+|---|---:|---:|
+| Drift turns | 560 | 459 confirmed |
+| goal_drift agreement | — | 100% |
+| constraint_violation agreement | — | 81% |
+| consistency_break agreement | — | 65% |
+
+### Phase 4: gated typed validators
+
+The breakthrough insight from per-template analysis:
+
+| Constraint | Validator | AUC | NLI AUC |
+|---|---|---:|---:|
+| email_drafter "under 150 words" | `len(words) > 150` | **0.829** | 0.504 |
+| childrens_story "under 200 words" | `len(words) > 200` | **0.984** | 0.529 |
+
+A 5-character word-count check beats an 8B-parameter NLI cross-encoder by
+0.32–0.45 ROC-AUC. The mistake was treating all 24 constraints as one
+"compliance detection" problem instead of routing each to the simplest matcher.
+
+Phase 4 introduced **typed validators** (`WordCountValidator`,
+`KeywordBlocklistValidator`, `RegexForbiddenValidator`,
+`NumberedStepsValidator`, `CodeBlockBudgetValidator`, `NLIFallbackValidator`,
+…) plus **gated constraints** so required-pattern rules only fire when the
+response is actually attempting the relevant content (e.g., "email must
+include CTA" only checks responses that look like email drafts).
+
+| | NLI AUC | Typed (un-gated) | **Typed (gated)** |
+|---|---:|---:|---:|
+| Constraint AUC on `constraint_violation` convs | 0.534 | 0.590 | **0.626** |
+| Drift-vs-clean separation on `constraint_violation` convs | — | +0.082 | **+0.111** |
+
+**Bottom line: gated typed validators beat NLI by +0.092 ROC-AUC on the slice
+where the constraint signal is supposed to fire**, with sub-millisecond
+latency and explainable evidence strings ("trigger active, requirement
+failed: word_count=237 > 150").
+
+The headline overall F1 (~0.46-0.49 for all detector variants) is bounded by
+the goal/consistency signals (0.64 AUC each — embedding/NLI ceilings) and the
+fact that constraint-violation convs are only 25% of the dataset. In a
+production setting where one drift type dominates or where signal quality on
+each axis matters independently, the architectural improvement is large.
+
+### What this benchmark proves
+
+1. The *data*, not the algorithm, was the bottleneck for most of the project.
+   Synthetic labels need careful regeneration and verification before they
+   support fine-grained ML evaluation.
+2. **Gated typed validators are the production-grade architecture** for
+   constraint-style drift detection: cheap, explainable, composable.
+3. NLI and LLM-judge belong as *fallbacks* for inherently fuzzy constraints
+   ("be professional", "family-friendly"), not as the default.
 
 Reports are checked into `reports/`:
 
-- `baseline_v0.md` — original detector
-- `v2_default.md` — v2 detector with default weights
-- `v2_fitted.md` — v2 detector with refit weights/threshold
+- `baseline_v0_relabeled.md` — v0 on the relabeled dataset
+- `v2_default.md` / `v2_fitted.md` — v2 NLI on the relabeled dataset
+- `v3_typed_default.md` / `v3_typed_fitted.md` — v3 gated typed validators
 - `comparison_v0_vs_v2_fitted.md` — side-by-side
+- `audit_clean_turns.json` — clean-turn FN audit
 - `fitted_config.json` — learned weights, threshold, severity buckets
 
-To reproduce:
+To reproduce the full pipeline:
 
 ```bash
-python Drift-Evaluator/scripts/run_phase2.py
-```
+# 1. Regenerate dataset (~2 hr)
+python Drift-Evaluator/scripts/generate_dataset.py --n 200
 
-(uses `reports/v2_default_rows.jsonl` cache to skip the ~15-min NLI re-eval
-unless `--force-eval` is passed).
+# 2. Relabel via strict LLM-judge (~45 min)
+python Drift-Evaluator/scripts/relabel_dataset.py --reset-first --prompt-version v2
+
+# 3. Run all detector variants
+python Drift-Evaluator/scripts/run_baseline.py --name baseline_v0_relabeled    # v0
+python Drift-Evaluator/scripts/run_phase2.py --force-eval                       # v2 NLI
+python Drift-Evaluator/scripts/run_phase3.py                                    # v2 LLM-judge (slow)
+python Drift-Evaluator/scripts/run_phase4.py                                    # v3 gated typed
+```
 
 ## License
 

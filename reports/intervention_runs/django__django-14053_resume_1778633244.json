@@ -1,0 +1,25 @@
+{
+  "instance_id": "django__django-14053",
+  "source": "livesweagent_opus45",
+  "intervention_step": 36,
+  "intervention_type": "scope_widen",
+  "intervention_draft": "Your current fix patches:\n  - `django/contrib/staticfiles/storage.py:~238` \u2014 Added deduplication check only to second pass loop (lines 236-240)\n\nThere is at least one additional site that requires a parallel fix:\n  - `django/contrib/staticfiles/storage.py:~231` \u2014 First pass loop must record hashed_name for adjustable files in processed_adjustable_paths dict\n\nApply the corresponding modification at that site too. The two changes go together; neither alone resolves the issue.",
+  "model": "claude-opus-4-5",
+  "truncated_at_msg": 36,
+  "new_messages_count": 0,
+  "completed": false,
+  "end_reason": "patch_apply_failed",
+  "final_patch": "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\n--- a/django/contrib/staticfiles/storage.py\n+++ b/django/contrib/staticfiles/storage.py\n@@ -226,18 +226,27 @@ def post_process(self, paths, dry_run=False, **options):\n             path for path in paths\n             if matches_patterns(path, self._patterns)\n         ]\n+\n+        # Track yielded files to avoid yielding the same file multiple times.\n+        # Only yield a file again if its hashed name has changed.\n+        processed_adjustable_paths = {}\n+\n         # Do a single pass first. Post-process all files once, then repeat for\n         # adjustable files.\n         for name, hashed_name, processed, _ in self._post_process(paths, adjustable_paths, hashed_files):\n+            if name in adjustable_paths:\n+                processed_adjustable_paths[name] = hashed_name\n             yield name, hashed_name, processed\n \n         paths = {path: paths[path] for path in adjustable_paths}\n \n         for i in range(self.max_post_process_passes):\n             substitutions = False\n             for name, hashed_name, processed, subst in self._post_process(paths, adjustable_paths, hashed_files):\n-                yield name, hashed_name, processed\n+                # Only yield if the hashed name has changed.\n+                if processed_adjustable_paths.get(name) != hashed_name:\n+                    processed_adjustable_paths[name] = hashed_name\n+                    yield name, hashed_name, processed\n                 substitutions = substitutions or subst\n \n             if not substitutions:\n",
+  "resolved_before": false,
+  "resolved_after": null,
+  "eval_report_path": null,
+  "elapsed_seconds": 88.4226610660553,
+  "mode": "one-shot",
+  "config": {
+    "use_detector": "claude",
+    "ground_detector": true,
+    "validate_patch": true,
+    "no_corrector": false,
+    "corrector_text_override": false
+  }
+}

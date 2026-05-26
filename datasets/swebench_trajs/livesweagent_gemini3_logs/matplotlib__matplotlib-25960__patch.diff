@@ -1,0 +1,95 @@
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index dab2bc4a5a..1a22d961fe 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -1584,7 +1584,8 @@ default: %(va)s
+         gs = GridSpec(nrows=nrows, ncols=ncols, figure=self,
+                       wspace=wspace, hspace=hspace,
+                       width_ratios=width_ratios,
+-                      height_ratios=height_ratios)
++                      height_ratios=height_ratios,
++                      left=0, right=1, bottom=0, top=1)
+ 
+         sfarr = np.empty((nrows, ncols), dtype=object)
+         for i in range(ncols):
+@@ -2272,19 +2273,33 @@ class SubFigure(FigureBase):
+             self.bbox_relative.p0 = bbox.p0
+             self.bbox_relative.p1 = bbox.p1
+             return
+-        # need to figure out *where* this subplotspec is.
+         gs = self._subplotspec.get_gridspec()
+-        wr = np.asarray(gs.get_width_ratios())
+-        hr = np.asarray(gs.get_height_ratios())
+-        dx = wr[self._subplotspec.colspan].sum() / wr.sum()
+-        dy = hr[self._subplotspec.rowspan].sum() / hr.sum()
+-        x0 = wr[:self._subplotspec.colspan.start].sum() / wr.sum()
+-        y0 = 1 - hr[:self._subplotspec.rowspan.stop].sum() / hr.sum()
++        # The subplotspec cannot be used to calculate the relative bbox because
++        # get_position uses the figure's subplotpars (with margins) if the
++        # gridspec does not have them set.  We want to use the gridspec's
++        # spacing, but default to 0/1 for the edges if they are not set.
++        # This is a bit of a hack to get the gridspec to do the right thing
++        # for us.
++        restore = {}
++        for attr, default in zip(
++                ['left', 'right', 'bottom', 'top', 'wspace', 'hspace'],
++                [0, 1, 0, 1, 0, 0]):
++            val = getattr(gs, attr)
++            if val is None:
++                restore[attr] = val
++                setattr(gs, attr, default)
++
++        try:
++            bbox = self._subplotspec.get_position(self.figure)
++        finally:
++            for attr, val in restore.items():
++                setattr(gs, attr, val)
++
+         if self.bbox_relative is None:
+-            self.bbox_relative = Bbox.from_bounds(x0, y0, dx, dy)
++            self.bbox_relative = bbox
+         else:
+-            self.bbox_relative.p0 = (x0, y0)
+-            self.bbox_relative.p1 = (x0 + dx, y0 + dy)
++            self.bbox_relative.p0 = bbox.p0
++            self.bbox_relative.p1 = bbox.p1
+ 
+     def get_constrained_layout(self):
+         """
+diff --git a/modify_bbox_calc_robust.txt b/modify_bbox_calc_robust.txt
+new file mode 100644
+index 0000000000..cb12ceb07f
+--- /dev/null
++++ b/modify_bbox_calc_robust.txt
+@@ -0,0 +1,27 @@
++        gs = self._subplotspec.get_gridspec()
++        # The subplotspec cannot be used to calculate the relative bbox because
++        # get_position uses the figure's subplotpars (with margins) if the
++        # gridspec does not have them set.  We want to use the gridspec's
++        # spacing, but default to 0/1 for the edges if they are not set.
++        # This is a bit of a hack to get the gridspec to do the right thing
++        # for us.
++        restore = {}
++        for attr, default in zip(
++                ['left', 'right', 'bottom', 'top', 'wspace', 'hspace'],
++                [0, 1, 0, 1, 0, 0]):
++            val = getattr(gs, attr)
++            if val is None:
++                restore[attr] = val
++                setattr(gs, attr, default)
++
++        try:
++            bbox = self._subplotspec.get_position(self.figure)
++        finally:
++            for attr, val in restore.items():
++                setattr(gs, attr, val)
++
++        if self.bbox_relative is None:
++            self.bbox_relative = bbox
++        else:
++            self.bbox_relative.p0 = bbox.p0
++            self.bbox_relative.p1 = bbox.p1
+diff --git a/reproduction_output.png b/reproduction_output.png
+new file mode 100644
+index 0000000000..09d1ad2fd5
+Binary files /dev/null and b/reproduction_output.png differ

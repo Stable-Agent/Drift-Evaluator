@@ -420,37 +420,41 @@ def evaluate(args):
 
 
 def frontier():
-    """Aggregate per-seed harness reports -> per-instance pass rate -> band."""
-    resolved = defaultdict(set)       # instance_id -> {seeds resolved}
-    seen = defaultdict(set)
-    # swebench writes <model_name_or_path>.<run_id>.json in CWD
+    """Aggregate per-seed harness reports -> per-instance pass rate -> band.
+
+    DENOMINATOR = all ATTEMPTED seeds (from runs.jsonl), NOT just harness-scored
+    ones. An empty patch is a real failed attempt; the harness simply doesn't
+    score it, so dividing by scored-seeds would inflate any instance whose only
+    non-empty seed happened to pass (e.g. 1 pass + 3 empty would read 1.0
+    all-pass instead of the honest 0.25)."""
+    resolved = defaultdict(set)
+    attempted = defaultdict(set)       # ALL seeds we ran the agent on
+    for r in (json.loads(l) for l in open(RUNS) if l.strip()):
+        attempted[r["instance_id"]].add(r["seed"])
     for rep in pathlib.Path(".").glob("multiseed_s*.multiseed_s*.json"):
         data = json.loads(rep.read_text())
         seed = int(re.search(r"s(\d+)", rep.name).group(1))
         for iid in data.get("resolved_ids", []):
             resolved[iid].add(seed)
-        for iid in (data.get("resolved_ids", []) + data.get("unresolved_ids", [])
-                    + data.get("error_ids", [])):
-            seen[iid].add(seed)
-    if not seen:
-        print("no harness reports found (run --eval first)."); return
-    rates = {iid: len(resolved[iid]) / len(seen[iid]) for iid in seen}
+    if not attempted:
+        print("no runs found (generate first)."); return
+    rates = {iid: len(resolved[iid]) / len(attempted[iid]) for iid in attempted}
     band = sorted(iid for iid, p in rates.items() if 0.25 <= p <= 0.75)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     (REPORTS_DIR / "frontier_v1.json").write_text(json.dumps(
         {"rates": rates, "frontier_band": band,
-         "n_seen": {i: len(s) for i, s in seen.items()}}, indent=2))
+         "n_attempted": {i: len(s) for i, s in attempted.items()},
+         "n_resolved": {i: len(s) for i, s in resolved.items()}}, indent=2))
     hist = defaultdict(int)
     for p in rates.values():
         hist[round(p, 2)] += 1
-    print(f"\n=== frontier selection (n={len(rates)} instances evaluated) ===")
+    print(f"\n=== frontier selection (n={len(rates)} instances; denom=attempted seeds) ===")
     print("pass-rate histogram:")
     for p in sorted(hist):
         print(f"  {p:.2f}: {'#'*hist[p]} ({hist[p]})")
     print(f"\nall-fail (0.0): {sum(1 for p in rates.values() if p==0)}")
     print(f"all-pass (1.0): {sum(1 for p in rates.values() if p==1)}")
-    print(f"FRONTIER BAND [0.25,0.75]: {len(band)} instances "
-          f"-> {REPORTS_DIR/'frontier_v1.json'}")
+    print(f"FRONTIER BAND [0.25,0.75]: {len(band)} of {len(rates)} -> {band}")
     print("Gate (spec §7): need >=30 in-band to proceed to the full 8-seed run.")
 
 

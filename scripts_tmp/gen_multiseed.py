@@ -26,8 +26,14 @@ from collections import defaultdict
 
 import requests
 
-MODEL = "qwen2.5-coder:14b"
-OLLAMA = "http://localhost:11434/api/chat"
+MODEL = os.environ.get("MULTISEED_MODEL", "qwen2.5-coder:14b")
+# Backend via the OpenAI-compatible /v1/chat/completions API — works with BOTH
+# ollama (local default) and vLLM (GPU host, the fast path: continuous batching
+# serves concurrent rollouts in parallel). Point at vLLM with:
+#   MULTISEED_BASE_URL=http://<host>:8000  MULTISEED_MODEL=SWE-bench/SWE-agent-LM-32B
+BASE_URL = os.environ.get("MULTISEED_BASE_URL", "http://localhost:11434").rstrip("/")
+API_KEY = os.environ.get("MULTISEED_API_KEY", "x")
+GEN_TIMEOUT = int(os.environ.get("MULTISEED_GEN_TIMEOUT", "240"))
 ROOT = pathlib.Path("Drift-Evaluator/datasets/multiseed_v1")
 RUNS = ROOT / "runs.jsonl"                 # one row per (instance, seed)
 STEPS_DIR = ROOT / "steps"                 # <inst>__s<seed>.json checkpoint sidecars
@@ -71,19 +77,23 @@ Find the root cause and make the minimal source-code edit that fixes it.
 Begin."""
 
 
-def ollama_chat(messages, seed, temp=0.7, num_predict=512):
+def chat(messages, seed, temp=0.7, max_tokens=512):
+    """OpenAI-compatible chat call. Backend-agnostic: ollama (/v1) or vLLM."""
+    url = f"{BASE_URL}/v1/chat/completions"
+    body = {"model": MODEL, "messages": messages, "temperature": temp,
+            "seed": seed, "max_tokens": max_tokens, "stream": False}
+    headers = {"Authorization": f"Bearer {API_KEY}"}
     for attempt in range(3):
         try:
-            r = requests.post(OLLAMA, json={
-                "model": MODEL, "messages": messages, "stream": False,
-                "options": {"temperature": temp, "seed": seed,
-                            "num_predict": num_predict}}, timeout=180)
+            r = requests.post(url, json=body, headers=headers, timeout=GEN_TIMEOUT)
             if r.status_code == 200:
-                return r.json()["message"]["content"]
+                return r.json()["choices"][0]["message"]["content"]
         except Exception:
             pass
         time.sleep(3 + attempt * 3)
     return None
+
+ollama_chat = chat   # back-compat alias
 
 
 _CMD_RE = re.compile(r"```(?:bash|sh)?\s*\n?(.*?)```", re.DOTALL)
@@ -389,29 +399,44 @@ def generate(args):
     print(f"pool={len(pool)} instances x {args.seeds} seeds; {len(done)} done "
           f"(namespace={NAMESPACE or 'local-build'}, "
           f"repos={'custom' if args.repos else ('light' if repos else 'all')})", flush=True)
-    rf = RUNS.open("a")
+    # Phase 1: ensure all images (sequential — concurrent builds would race on
+    # shared base/env layers). Skips instances whose image can't be built/pulled.
+    import docker, threading
+    from concurrent.futures import ThreadPoolExecutor
+    cl = docker.from_env()
+    ready = []
     for inst in pool:
-        iid, repo = inst["instance_id"], inst["repo"]
+        iid = inst["instance_id"]
         if all((iid, s) in done for s in range(args.seeds)):
             continue
-        # Build instance image (once) + start one container per instance,
-        # reset between seeds. Linux toolchain == eval env.
         try:
-            cl = ensure_instance_image(inst)
+            ensure_instance_image(inst); ready.append(inst)
         except Exception as e:
-            print(f"  {iid}: image build failed ({e}); skip", file=sys.stderr)
-            continue
-        container = None
+            print(f"  {iid}: image unavailable ({str(e)[:80]}); skip", file=sys.stderr)
+    tasks = [(inst, s) for inst in ready for s in range(args.seeds)
+             if (inst["instance_id"], s) not in done]
+    print(f"images ready: {len(ready)}; rollouts to run: {len(tasks)} "
+          f"(workers={args.workers}, backend={BASE_URL})", flush=True)
+
+    # Phase 2: run rollouts concurrently — vLLM batches the parallel model calls.
+    lock = threading.Lock()
+    rf = RUNS.open("a")
+
+    def one_rollout(inst, seed):
+        iid, repo = inst["instance_id"], inst["repo"]
+        cname = f"ms_{iid.replace('__','_')[:44]}_s{seed}"
         try:
-            container = start_container(cl, inst)
-            for seed in range(args.seeds):
-                if (iid, seed) in done:
-                    continue
-                container.exec_run(["bash", "-lc", "git reset --hard -q && git clean -fdxq"],
-                                   workdir=TESTBED)
-                t0 = time.time()
-                patch, steps = run_agent(repo, inst["problem_statement"], container,
-                                         seed, args.max_steps)
+            try: cl.containers.get(cname).remove(force=True)
+            except Exception: pass
+            c = cl.containers.run(_spec(inst).instance_image_key, command="sleep infinity",
+                                  name=cname, detach=True, working_dir=TESTBED)
+        except Exception as e:
+            sys.stderr.write(f"  {iid} s{seed}: container start failed: {e}\n"); return
+        try:
+            c.exec_run(["bash", "-lc", "git reset --hard -q && git clean -fdxq"], workdir=TESTBED)
+            t0 = time.time()
+            patch, steps = run_agent(repo, inst["problem_statement"], c, seed, args.max_steps)
+            with lock:
                 (STEPS_DIR / f"{iid}__s{seed}.json").write_text(json.dumps(steps))
                 rf.write(json.dumps({
                     "instance_id": iid, "repo": repo, "seed": seed,
@@ -421,14 +446,14 @@ def generate(args):
                     "secs": round(time.time() - t0, 1)}) + "\n")
                 rf.flush()
                 print(f"  {iid} s{seed}: {len(steps)} steps, "
-                      f"{'EMPTY' if not patch.strip() else str(patch.count(chr(10)))+' diff lines'} "
+                      f"{'EMPTY' if not patch.strip() else str(patch.count(chr(10)))+'L'} "
                       f"({time.time()-t0:.0f}s)", flush=True)
         finally:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+            try: c.remove(force=True)
+            except Exception: pass
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        list(ex.map(lambda t: one_rollout(*t), tasks))
     rf.close()
     print("generation done.", flush=True)
 
@@ -481,23 +506,29 @@ def evaluate(args):
         done = {(r["instance_id"], r["seed"]) for r in
                 (json.loads(l) for l in open(EVAL_OUT) if l.strip())
                 if r.get("resolved") is not None}
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
     cl = docker.from_env()
-    of = EVAL_OUT.open("a")
-    print(f"native eval (arch={ARCH}): {len(rows)} rows, {len(done)} already graded", flush=True)
-    for r in rows:
-        key = (r["instance_id"], r["seed"])
-        if key in done:
-            continue
-        inst = meta.get(r["instance_id"])
-        if inst is None:
-            continue
-        ensure_instance_image(inst)
-        resolved = native_eval_one(cl, inst, r["patch"])
-        of.write(json.dumps({"instance_id": r["instance_id"], "seed": r["seed"],
-                             "resolved": resolved}) + "\n")
-        of.flush()
-        print(f"  {r['instance_id']} s{r['seed']}: "
-              f"{'RESOLVED' if resolved else ('error' if resolved is None else 'fail')}", flush=True)
+    todo = [r for r in rows if (r["instance_id"], r["seed"]) not in done
+            and r["instance_id"] in meta]
+    # ensure images once (sequential), then grade concurrently
+    for iid in {r["instance_id"] for r in todo}:
+        try: ensure_instance_image(meta[iid])
+        except Exception as e: print(f"  {iid}: image unavailable ({str(e)[:60]})", file=sys.stderr)
+    lock = threading.Lock(); of = EVAL_OUT.open("a")
+    print(f"native eval (arch={ARCH}, workers={args.max_workers}): "
+          f"{len(todo)} to grade, {len(done)} done", flush=True)
+
+    def grade(r):
+        resolved = native_eval_one(cl, meta[r["instance_id"]], r["patch"])
+        with lock:
+            of.write(json.dumps({"instance_id": r["instance_id"], "seed": r["seed"],
+                                 "resolved": resolved}) + "\n")
+            of.flush()
+            print(f"  {r['instance_id']} s{r['seed']}: "
+                  f"{'RESOLVED' if resolved else ('error' if resolved is None else 'fail')}", flush=True)
+    with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
+        list(ex.map(grade, todo))
     of.close()
     frontier()
 
@@ -545,7 +576,9 @@ def main():
     ap.add_argument("--n", type=int, default=120, help="candidate instances")
     ap.add_argument("--seeds", type=int, default=4, help="K seeds (pilot=4)")
     ap.add_argument("--max-steps", type=int, default=15)
-    ap.add_argument("--max-workers", type=int, default=4, help="harness workers")
+    ap.add_argument("--workers", type=int, default=int(os.environ.get("MULTISEED_WORKERS", "1")),
+                    help="concurrent rollouts (set high on a GPU host w/ vLLM batching)")
+    ap.add_argument("--max-workers", type=int, default=4, help="eval workers")
     ap.add_argument("--repos", default="", help="comma list to override the "
                     "default light-repo allowlist (e.g. 'django/django')")
     ap.add_argument("--eval", action="store_true")

@@ -33,6 +33,7 @@ RUNS = ROOT / "runs.jsonl"                 # one row per (instance, seed)
 STEPS_DIR = ROOT / "steps"                 # <inst>__s<seed>.json checkpoint sidecars
 PREDS_DIR = ROOT / "preds"                 # per-seed predictions for the harness
 REPORTS_DIR = ROOT / "reports"
+WORK_LOGS = ROOT / "eval_logs"             # native eval logs per instance
 CMD_TIMEOUT = 60
 OUT_TRUNC = 2500
 
@@ -126,42 +127,81 @@ def sh(args, cwd=None, timeout=120, inp=None):
 # identical to the eval env.
 TESTBED = "/testbed"
 
-# namespace: "swebench" pulls PREBUILT x86 images from Docker Hub (Linux host,
-# the fast path — no building). None builds locally (the arm64-Mac path that
-# OOMs under emulation; see reference-arm64-swebench-docker).
+# Image source, in priority:
+#   ARCH=arm64  -> BUILD NATIVE arm64 with the Miniforge fix (Apple Silicon;
+#                  no emulation, no GPU host — see reference-arm64-swebench-docker)
+#   NAMESPACE set (x86 Linux) -> PULL prebuilt images (fast)
+#   else -> local x86 build
+# Default ARCH: arm64 on Apple Silicon, else x86_64.
+import platform as _platform
+ARCH = os.environ.get("MULTISEED_ARCH",
+                      "arm64" if _platform.machine() in ("arm64", "aarch64") else "x86_64")
 NAMESPACE = os.environ.get("MULTISEED_NAMESPACE", "swebench")
+_MINIFORGE = ("https://github.com/conda-forge/miniforge/releases/latest/"
+              "download/Miniforge3-Linux-aarch64.sh")
+
+def _spec(inst):
+    from swebench.harness.test_spec.test_spec import make_test_spec
+    if ARCH == "arm64":
+        return make_test_spec(inst, namespace=None, arch="arm64")
+    ns = None if NAMESPACE in ("", "none", "None") else NAMESPACE
+    return make_test_spec(inst, namespace=ns)
 
 def docker_image_for(inst) -> str:
-    from swebench.harness.test_spec.test_spec import make_test_spec
-    ns = None if NAMESPACE in ("", "none", "None") else NAMESPACE
-    return make_test_spec(inst, namespace=ns).instance_image_key
+    return _spec(inst).instance_image_key
+
+def _patch_miniforge(base_df: str) -> str:
+    """Swap the broken Miniconda aarch64 installer for Miniforge (real conda
+    that works native aarch64). See reference-arm64-swebench-docker."""
+    out, ok = [], False
+    for line in base_df.splitlines():
+        if "miniconda.sh" in line and "wget" in line.lower():
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f"{indent}RUN wget '{_MINIFORGE}' -O miniconda.sh \\")
+            ok = True
+        else:
+            out.append(line)
+    if not ok:
+        raise RuntimeError("miniforge patch: no miniconda wget line found")
+    return "\n".join(out)
 
 def ensure_instance_image(inst):
-    """Make the instance image available. With NAMESPACE set (Linux x86),
-    PULL the prebuilt image (fast, no build). With NAMESPACE empty, build
-    locally (slow; OOMs under arm emulation — tag defaults are None in
-    swebench 4.1.0 but make_test_spec requires them, so pass 'latest')."""
-    import docker
+    """Make the instance image available for the active ARCH."""
+    import docker, pathlib as _pl
     cl = docker.from_env()
-    key = docker_image_for(inst)
-    if NAMESPACE not in ("", "none", "None"):
-        try:
-            cl.images.get(key)
-        except Exception:
-            repo, _, tag = key.rpartition(":")
-            cl.images.pull(repo, tag=tag or "latest")
+    s = _spec(inst)
+    key = s.instance_image_key
+    try:
+        cl.images.get(key); return cl
+    except Exception:
+        pass
+    if ARCH == "arm64":
+        from swebench.harness.docker_build import build_image
+        bd = _pl.Path("/tmp/multiseed/arm_build") / inst["instance_id"]
+        bd.mkdir(parents=True, exist_ok=True)
+        def have(k):
+            try: cl.images.get(k); return True
+            except Exception: return False
+        if not have(s.base_image_key):
+            build_image(s.base_image_key, {}, _patch_miniforge(s.base_dockerfile),
+                        s.platform, cl, bd / "base")
+        if not have(s.env_image_key):
+            build_image(s.env_image_key, {"setup_env.sh": s.setup_env_script},
+                        s.env_dockerfile, s.platform, cl, bd / "env")
+        build_image(key, {"setup_repo.sh": s.install_repo_script},
+                    s.instance_dockerfile, s.platform, cl, bd / "inst")
+    elif NAMESPACE not in ("", "none", "None"):
+        repo, _, tag = key.rpartition(":")
+        cl.images.pull(repo, tag=tag or "latest")
     else:
         from swebench.harness.docker_build import build_instance_images
         build_instance_images(cl, [inst], force_rebuild=False, max_workers=4,
                               namespace=None, tag="latest", env_image_tag="latest")
-    # swebench LOGS build failures without raising — verify the image exists,
-    # else generate() would proceed on a phantom image.
     try:
         cl.images.get(key)
     except Exception:
-        raise RuntimeError(
-            f"instance image {key} unavailable (pull failed, or local build "
-            f"OOM/exit-137 under emulation). See reference-arm64-swebench-docker.")
+        raise RuntimeError(f"instance image {key} unavailable after build/pull "
+                           f"(arch={ARCH}). See reference-arm64-swebench-docker.")
     return cl
 
 def start_container(cl, inst):
@@ -393,29 +433,72 @@ def generate(args):
     print("generation done.", flush=True)
 
 
+EVAL_OUT = REPORTS_DIR / "eval_native.jsonl"   # {instance_id, seed, resolved}
+
+def native_eval_one(cl, inst, patch: str) -> bool | None:
+    """Grade one patch in a NATIVE container (works on arm64 and x86; bypasses
+    the x86-defaulting run_evaluation CLI). Returns resolved bool, or None if
+    the harness errored. Empty patch -> False (a real failed attempt)."""
+    from swebench.harness.grading import get_eval_report
+    if not (patch or "").strip():
+        return False
+    s = _spec(inst)
+    c = cl.containers.run(s.instance_image_key, command="sleep infinity",
+                          detach=True, working_dir=TESTBED)
+    try:
+        c.exec_run(["bash", "-lc", "git reset --hard -q && git clean -fdxq"], workdir=TESTBED)
+        write_file(c, "/tmp/patch.diff", patch)
+        ap = c.exec_run(["bash", "-lc", "cd /testbed && git apply -v /tmp/patch.diff"])
+        if ap.exit_code != 0:                      # candidate doesn't apply = fail
+            return False
+        write_file(c, "/eval.sh", s.eval_script)
+        res = c.exec_run(["bash", "-lc", "chmod +x /eval.sh && /eval.sh"], workdir=TESTBED)
+        log = res.output.decode("utf-8", "replace") if res.output else ""
+        lp = WORK_LOGS / f"{inst['instance_id']}.log"; lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.write_text(log)
+        pred = {"instance_id": inst["instance_id"], "model_name_or_path": "ms",
+                "model_patch": patch}
+        report = get_eval_report(s, pred, str(lp), include_tests_status=True)
+        return bool(report.get(inst["instance_id"], {}).get("resolved", False))
+    except Exception as e:
+        sys.stderr.write(f"  native_eval err {inst['instance_id']}: {e}\n")
+        return None
+    finally:
+        try: c.remove(force=True)
+        except Exception: pass
+
+
 def evaluate(args):
-    PREDS_DIR.mkdir(parents=True, exist_ok=True); REPORTS_DIR.mkdir(exist_ok=True)
+    """Native in-container grading per (instance, seed). Resumable."""
+    import docker
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     rows = [json.loads(l) for l in open(RUNS) if l.strip()]
-    by_seed = defaultdict(list)
+    by_iid = {}
+    pool = load_pool(10**6, None)              # instance metadata for specs
+    meta = {r["instance_id"]: r for r in pool}
+    done = set()
+    if EVAL_OUT.exists():
+        done = {(r["instance_id"], r["seed"]) for r in
+                (json.loads(l) for l in open(EVAL_OUT) if l.strip())
+                if r.get("resolved") is not None}
+    cl = docker.from_env()
+    of = EVAL_OUT.open("a")
+    print(f"native eval (arch={ARCH}): {len(rows)} rows, {len(done)} already graded", flush=True)
     for r in rows:
-        by_seed[r["seed"]].append(r)
-    for seed, rs in sorted(by_seed.items()):
-        pf = PREDS_DIR / f"preds_s{seed}.jsonl"
-        with pf.open("w") as f:
-            for r in rs:
-                f.write(json.dumps({
-                    "instance_id": r["instance_id"],
-                    "model_name_or_path": f"multiseed_s{seed}",
-                    "model_patch": r["patch"]}) + "\n")
-        run_id = f"multiseed_s{seed}"
-        print(f"=== eval seed {seed}: {len(rs)} preds -> harness run_id={run_id} ===", flush=True)
-        cmd = [sys.executable, "-m", "swebench.harness.run_evaluation",
-               "--dataset_name", "princeton-nlp/SWE-bench_Verified",
-               "--predictions_path", str(pf), "--run_id", run_id,
-               "--max_workers", str(args.max_workers), "--cache_level", "env"]
-        if NAMESPACE not in ("", "none", "None"):
-            cmd += ["--namespace", NAMESPACE]      # pull prebuilt x86 images
-        subprocess.run(cmd)
+        key = (r["instance_id"], r["seed"])
+        if key in done:
+            continue
+        inst = meta.get(r["instance_id"])
+        if inst is None:
+            continue
+        ensure_instance_image(inst)
+        resolved = native_eval_one(cl, inst, r["patch"])
+        of.write(json.dumps({"instance_id": r["instance_id"], "seed": r["seed"],
+                             "resolved": resolved}) + "\n")
+        of.flush()
+        print(f"  {r['instance_id']} s{r['seed']}: "
+              f"{'RESOLVED' if resolved else ('error' if resolved is None else 'fail')}", flush=True)
+    of.close()
     frontier()
 
 
@@ -431,11 +514,10 @@ def frontier():
     attempted = defaultdict(set)       # ALL seeds we ran the agent on
     for r in (json.loads(l) for l in open(RUNS) if l.strip()):
         attempted[r["instance_id"]].add(r["seed"])
-    for rep in pathlib.Path(".").glob("multiseed_s*.multiseed_s*.json"):
-        data = json.loads(rep.read_text())
-        seed = int(re.search(r"s(\d+)", rep.name).group(1))
-        for iid in data.get("resolved_ids", []):
-            resolved[iid].add(seed)
+    if EVAL_OUT.exists():              # native grading results
+        for r in (json.loads(l) for l in open(EVAL_OUT) if l.strip()):
+            if r.get("resolved"):
+                resolved[r["instance_id"]].add(r["seed"])
     if not attempted:
         print("no runs found (generate first)."); return
     rates = {iid: len(resolved[iid]) / len(attempted[iid]) for iid in attempted}

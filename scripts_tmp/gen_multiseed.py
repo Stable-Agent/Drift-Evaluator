@@ -113,7 +113,21 @@ def extract_cmd(text: str) -> str | None:
         if cand:
             cmd = cand
             break
-    if not cmd:                       # no usable fenced block -> try raw text
+    if not cmd:                       # no ```fence``` -> try <bash>...</bash> tags
+        m2 = re.search(r"<bash>\s*\n?(.*?)</bash>", text or "", re.DOTALL)
+        if m2:
+            cmd = m2.group(1).strip()
+    if not cmd:                       # SWE-agent-LM models emit thought + a
+        # command, often mis-tagged (<bash\ncmd\n</bash>, <cat path>). Last
+        # resort: grab the first line that looks like a shell command, stripping
+        # stray < > tag chars.
+        for ln in (text or "").splitlines():
+            s = ln.strip().lstrip("<").rstrip(">").strip()
+            if re.match(r"^(cat|grep|ls|find|sed|python3?|cd|head|tail|git|awk|"
+                        r"echo|pytest|mv|cp|touch|rg|nl|wc)\b", s):
+                cmd = s
+                break
+    if not cmd:                       # no usable command/block -> raw text
         lines = [ln for ln in (text or "").splitlines() if not _FENCE_LINE.match(ln)]
         cmd = "\n".join(lines).strip().strip("`").strip()
     if not cmd:
@@ -290,20 +304,39 @@ def apply_edit(container, path, search, replace) -> tuple[bool, str]:
     return True, "edit applied"
 
 
-def run_agent(repo, problem, container, seed, max_steps):
+def run_agent(repo, problem, container, seed, max_steps, steps_path=None, tag=""):
     """Minimal bash-loop agent running INSIDE the instance container. Returns
-    (patch, steps) where steps[i] holds the cumulative diff after step i (the
-    in-flight checkpoint trail)."""
+    (patch, steps). Writes each step to steps_path AS IT HAPPENS and prints a
+    live progress line (per-call seconds, action, diff size) so a slow run is
+    observable instead of a black box."""
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": USER0.format(repo=repo, problem=problem[:4000])}]
     steps = []
     nudged = False
     repeat_nudged = False
     recent: list[str] = []
+
+    def record(step, call_secs=None):
+        if call_secs is not None:
+            step["call_secs"] = round(call_secs, 1)
+        steps.append(step)
+        if steps_path:
+            try: pathlib.Path(steps_path).write_text(json.dumps(steps))
+            except Exception: pass
+        act = (step.get("action") or ("done" if step.get("done") else
+               "stuck" if step.get("stuck") else step.get("error", "?")))
+        extra = (f"applied={step['applied']}" if step.get("action") == "edit"
+                 else f"rc={step.get('rc')}" if step.get("action") == "bash" else "")
+        cs = f" call={step['call_secs']:.0f}s" if step.get("call_secs") else ""
+        print(f"    [{tag}] step {step['step']} {act} {extra} "
+              f"diff={step.get('cum_diff','').count(chr(10))}L{cs}", flush=True)
+
     for i in range(max_steps):
+        t0 = time.time()
         reply = ollama_chat(messages, seed=seed)
+        call_secs = time.time() - t0
         if reply is None:
-            steps.append({"step": i, "error": "model_call_failed"})
+            record({"step": i, "error": "model_call_failed"}, call_secs)
             break
         messages.append({"role": "assistant", "content": reply})
 
@@ -313,8 +346,8 @@ def run_agent(repo, problem, container, seed, max_steps):
             path, search, replace = edit
             ok, msg = apply_edit(container, path, search, replace)
             diff_now = container_diff(container)
-            steps.append({"step": i, "action": "edit", "path": path,
-                          "applied": ok, "msg": msg, "cum_diff": diff_now})
+            record({"step": i, "action": "edit", "path": path,
+                    "applied": ok, "msg": msg, "cum_diff": diff_now}, call_secs)
             messages.append({"role": "user", "content":
                 f"[edit {path}: {msg}]\n"
                 f"git diff is now {'NON-EMPTY' if diff_now.strip() else 'EMPTY'}.\n"
@@ -331,7 +364,7 @@ def run_agent(repo, problem, container, seed, max_steps):
                     "Do NOT say TASK_COMPLETE. Locate the buggy lines and make an "
                     "EDIT block now."})
                 continue
-            steps.append({"step": i, "done": True, "cum_diff": diff_now})
+            record({"step": i, "done": True, "cum_diff": diff_now}, call_secs)
             break
         # loop-breaker: on a repeated command, first NUDGE toward editing;
         # only stop if it keeps repeating after the nudge.
@@ -346,13 +379,13 @@ def run_agent(repo, problem, container, seed, max_steps):
                     "exact lines to change."})
                 continue
             if recent[-1] == recent[-2] == recent[-3]:
-                steps.append({"step": i, "stuck": True, "cmd": cmd[:300], "cum_diff": diff_now})
+                record({"step": i, "stuck": True, "cmd": cmd[:300], "cum_diff": diff_now}, call_secs)
                 break
         rc, out = dexec(container, cmd)
         out = out[:OUT_TRUNC]
         diff_now = container_diff(container)
-        steps.append({"step": i, "action": "bash", "cmd": cmd[:300], "rc": rc,
-                      "cum_diff": diff_now})
+        record({"step": i, "action": "bash", "cmd": cmd[:300], "rc": rc,
+                "cum_diff": diff_now}, call_secs)
         messages.append({"role": "user",
                          "content": f"[exit {rc}]\n{out}\n\n"
                          f"git diff is currently {'EMPTY' if not diff_now.strip() else 'non-empty'}. "
@@ -435,9 +468,10 @@ def generate(args):
         try:
             c.exec_run(["bash", "-lc", "git reset --hard -q && git clean -fdxq"], workdir=TESTBED)
             t0 = time.time()
-            patch, steps = run_agent(repo, inst["problem_statement"], c, seed, args.max_steps)
+            sp = STEPS_DIR / f"{iid}__s{seed}.json"
+            patch, steps = run_agent(repo, inst["problem_statement"], c, seed,
+                                     args.max_steps, steps_path=sp, tag=f"{iid} s{seed}")
             with lock:
-                (STEPS_DIR / f"{iid}__s{seed}.json").write_text(json.dumps(steps))
                 rf.write(json.dumps({
                     "instance_id": iid, "repo": repo, "seed": seed,
                     "model": MODEL, "temperature": 0.7, "max_steps": args.max_steps,

@@ -14,6 +14,29 @@ becomes an open model (+ scaffold) that matches or beats a frontier model on a
 *narrowly specified* detection and correction task — with frontier reframed as
 the **teacher and the baseline to beat**, not the product.
 
+## 0.5 Prior art to build on (verified 2026-06-20) — do NOT reinvent
+
+The correction half of "open ≈ frontier" is **already substantially
+demonstrated** by open projects. Build on them; our novelty is detection +
+the closed loop, not the data engine.
+
+- **SWE-smith** (github.com/SWE-bench/SWE-smith, NeurIPS 2025 spotlight): 52K
+  task instances, 26K trajectories, 250+ Docker envs, and **SWE-agent-LM-32B —
+  a fine-tuned Qwen2.5-Coder hitting 40.2% pass@1 on SWE-bench Verified**, open
+  checkpoint on HF. This is the parity thesis for *correction*, already done.
+- **SWE-Gym** (github.com/SWE-Gym/SWE-Gym): executable training env, 2.4K tasks
+  (234 Lite), prebuilt images, GPT-4o/Sonnet trajectories; 32B → 32% Verified
+  with self-improvement; **+14% absolute from <500 trajectories**. This IS the
+  rejection-sampling data engine of WS1, maintained.
+- **Aider** / **mini-swe-agent**: robust open agent scaffolds (SEARCH/REPLACE
+  edit formats, ollama support) — replace our hand-rolled loop.
+
+Implication: WS1 adopts SWE-Gym/SWE-smith rather than rebuilding; the **agent
+becomes SWE-agent-LM-32B** (≈40% Verified) instead of raw qwen2.5-coder:14b
+(mini-pilot: 25% band, 0 full resolves — too weak). Our distinctive
+contribution narrows to **white-box detection** and the **execution-in-the-loop
+corrector** — the parts SWE-Gym/SWE-smith do not target.
+
 ## 1. The bar (state it precisely; do not overclaim)
 
 Achievable and defensible:
@@ -53,19 +76,15 @@ F2P/P2P checkpoints, the SEARCH/REPLACE apply loop.
 
 ## 3. Three workstreams
 
-### WS1 — Rejection-sampling data engine (the unlock; half-built already)
-The multi-seed harness (`gen_multiseed.py`) that *measures* "does the open
-model land in the frontier band" IS the engine that *improves* it:
-
-> generate (open model, many seeds) → execution-filter to verified-correct
-> patches → SFT / rejection-sample → re-generate → measure uplift.
-
-Every execution-verified resolved seed is a training target (problem →
-correct, test-passing patch). This is STaR/rejection-sampling and it needs no
-human labels — tests are the filter. Detection analog: use frontier models (or
-gold) as the *teacher* to label drift/truth-sites, distill into the open model
-(the validated recipe localize → hand over code → fresh solve becomes the
-teacher signal).
+### WS1 — Rejection-sampling data engine (ADOPT SWE-Gym/SWE-smith, don't rebuild)
+The loop is: generate (open model, many seeds) → execution-filter to
+verified-correct patches → SFT/rejection-sample → re-generate → measure uplift.
+**SWE-Gym and SWE-smith already provide this** (envs, trajectories, the +14%-
+from-<500-trajectories result, and a 40.2% checkpoint). So WS1 = use their
+data/env + checkpoint as the starting point; our `gen_multiseed.py` becomes the
+*local within-cluster measurement + white-box signal extractor* on top, not the
+training engine itself. Detection analog still ours: frontier (or gold) as
+teacher to label drift/truth-sites, distilled into the open model.
 
 ### WS2 — White-box detector
 Serve the open model with logprob/activation access (vLLM, not ollama chat).
@@ -100,15 +119,19 @@ frontier-in-loop vs frontier-one-shot, execution-scored.
 - "Frontier drift detection is the primary product" framing — frontier becomes
   teacher + baseline, open-model uplift becomes the deliverable.
 
-## 6. Sequence
+## 6. Sequence (revised: build on prior art)
 
-1. Finish the qwen mini-pilot (in flight) → measures the *starting* open↔frontier
-   gap and confirms the band exists. This is WS1's first data point.
-2. If a band exists: stand up the rejection-sampling loop (WS1) on a GPU host;
-   measure uplift round over round.
-3. In parallel, WS2 white-box detector on the same corpus (cheap; reuses runs).
-4. WS3 test-driven corrector head-to-head once WS1 has a fine-tuned checkpoint.
-5. Freeze a head-to-head prereg before claiming parity.
+1. ✅ Mini-pilot done — qwen2.5-coder:14b: 25% band, 0 full resolves (too weak
+   as the agent). Harness validated end-to-end.
+2. **Swap the agent to SWE-agent-LM-32B** (≈40% Verified) and re-pilot the
+   band — far more in-band expected. Run arm64-native locally (Miniforge fix)
+   or on GPU; 32B inference is the point a GPU host earns its keep.
+3. WS2 white-box detector on the multi-seed corpus (cheap; our novelty; needs
+   the model served with logprobs via vLLM).
+4. WS1 uplift: start from SWE-Gym/SWE-smith data+checkpoint; measure round-over-
+   round gains with our execution-verified within-cluster filter.
+5. WS3 execution-in-the-loop corrector, head-to-head vs frontier.
+6. Freeze a head-to-head prereg before claiming parity.
 
 ## 7. Honest risks
 

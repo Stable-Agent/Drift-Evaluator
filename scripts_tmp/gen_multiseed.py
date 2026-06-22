@@ -502,6 +502,12 @@ def native_eval_one(cl, inst, patch: str) -> bool | None:
     if not (patch or "").strip():
         return False
     s = _spec(inst)
+    try:                                  # image must already exist locally;
+        cl.images.get(s.instance_image_key)   # never auto-pull (arm has no hub
+    except Exception:                         # images -> would 404 and crash)
+        sys.stderr.write(f"  native_eval skip {inst['instance_id']}: "
+                         f"image {s.instance_image_key} not present\n")
+        return None
     c = cl.containers.run(s.instance_image_key, command="sleep infinity",
                           detach=True, working_dir=TESTBED)
     try:

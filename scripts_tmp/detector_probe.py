@@ -30,9 +30,18 @@ ROOT = pathlib.Path("Drift-Evaluator/datasets/multiseed_v1")
 RUNS = ROOT / "runs.jsonl"
 STEPS = ROOT / "steps"
 EVAL = ROOT / "reports" / "eval_native.jsonl"
-CACHE = pathlib.Path("Drift-Evaluator/reports/detector_probe_cache.jsonl")
-OUT = pathlib.Path("Drift-Evaluator/reports/detector_probe.json")
+REPORTS = pathlib.Path("Drift-Evaluator/reports")
+FRONTIER_CACHE = REPORTS / "detector_probe_cache.jsonl"   # shared frontier scores
 OLLAMA = "http://localhost:11434/v1/chat/completions"
+
+def cache_path(open_model: str) -> pathlib.Path:
+    """Per-open-model cache so different judges don't overwrite each other."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", open_model)
+    return REPORTS / f"detector_probe_cache__{safe}.jsonl"
+
+def out_path(open_model: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", open_model)
+    return REPORTS / f"detector_probe__{safe}.json"
 
 
 def load_corpus():
@@ -173,11 +182,20 @@ def main():
           f"{sum(r['failed'] for r in rows)} failed / {sum(not r['failed'] for r in rows)} resolved",
           flush=True)
 
+    CACHE = cache_path(args.open_model)
+    OUT = out_path(args.open_model)
     cache = {}
     if CACHE.exists():
         for l in open(CACHE):
             if l.strip():
                 c = json.loads(l); cache[(c["iid"], c["seed"])] = c
+    # reuse already-paid frontier scores from the shared cache
+    if FRONTIER_CACHE.exists() and FRONTIER_CACHE != CACHE:
+        for l in open(FRONTIER_CACHE):
+            if l.strip():
+                fc = json.loads(l); k = (fc["iid"], fc["seed"])
+                cache.setdefault(k, {}).setdefault("frontier_judge", fc.get("frontier_judge"))
+                cache[k]["iid"], cache[k]["seed"] = fc["iid"], fc["seed"]
 
     if not args.analyze_only and not args.structural_only:
         cf = CACHE.open("a")

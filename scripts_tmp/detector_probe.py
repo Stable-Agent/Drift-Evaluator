@@ -111,7 +111,7 @@ def parse_prob(txt):
 def claude_bin():
     return shutil.which("claude") or "/opt/homebrew/bin/claude"
 
-def frontier_call(text, model, timeout=120):
+def frontier_call(text, model, timeout=300):
     try:
         r = subprocess.run([claude_bin(), "-p", "--model", model],
                            input=JUDGE_PROMPT.format(text=text),

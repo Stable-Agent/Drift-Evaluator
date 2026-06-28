@@ -21,7 +21,8 @@ sys.path.insert(0, "Drift-Evaluator/scripts_tmp")
 import detector_probe as dp
 
 WB_CACHE = "Drift-Evaluator/reports/whitebox_probe_cache.jsonl"
-FR_CACHE = "Drift-Evaluator/reports/detector_probe_cache.jsonl"
+# frontier scores live in the per-open-model cache after the cache refactor
+FR_CACHE = "Drift-Evaluator/reports/detector_probe_cache__qwen2.5-coder_14b.jsonl"
 WB_FEATS = ["answer_entropy", "margin", "mean_logprob", "p_fail"]
 ST_FEATS = ["n_steps", "stuck", "rc_err_frac", "max_diff_lines", "final_patch_lines"]
 FEATS = WB_FEATS + ST_FEATS
